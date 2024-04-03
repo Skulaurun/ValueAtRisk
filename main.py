@@ -24,6 +24,8 @@ from docx.enum.section import WD_SECTION
     # Variance-Covariance Method
     # Graf pro 99%, 97%, 95%
 
+# Plotly doesn't add shapes added using `add_shape` to the legend,
+# so we create an invisible trace
 def add_line_with_legend(fig, x0, x1, y0, y1, line, description):
     fig.add_shape(
         type='line',
@@ -41,7 +43,14 @@ def add_line_with_legend(fig, x0, x1, y0, y1, line, description):
         name=description
     ))
 
+# Generate graph for three VaRs and price
+# : info = yfinance ticker.info
+# : close_prices = pandas dataframe of close prices acquired using yfinance
+# : VaRs = 
 def generate_graph(info, close_prices, VaRs=[]):
+    # Since the VaR line needs to be added after the last price,
+    # we extend the x axis (time) by one month
+
     # Get the last date in the current data
     last_date = close_prices.index[-1]
     # Calculate the first date of the next month
@@ -53,12 +62,18 @@ def generate_graph(info, close_prices, VaRs=[]):
     # Concatenate the existing data with the new data
     extended_close_prices = pd.concat([close_prices, additional_month_data['Close']])
 
+    # Real last price
     last_price_x0 = close_prices.index[-1]
+    # Fictional last price
     last_price_x1 = extended_close_prices.index[-1]
 
     fig = go.Figure(data=go.Scatter(x=extended_close_prices.index, y=extended_close_prices, name='Price'))
+    # Add graph and axis titles
     fig.update_layout(title=f'{info.get("shortName")} ({info.get("symbol")})', xaxis_title='Datum', yaxis_title='Cena')
 
+    # VaR[0] - confidence 0 - 1
+    # VaR[1] - color
+    # VaR[2] - value
     for VaR in VaRs:
         add_line_with_legend(
             fig,
@@ -70,28 +85,39 @@ def generate_graph(info, close_prices, VaRs=[]):
             description=f'VaR {int(VaR[0] * 100)}% (={round(VaR[2], 2)})'
         )
 
+    # Add legend (and set its position)
     fig.update_layout(legend=dict(x=0.74, y=1.3, bgcolor='rgba(255, 255, 255, 0.5)'))
     return fig
 
+# Calculate VaR
+# : ticker = yfinance ticker
+# : method = function, one of (historic_var, varcov_var, monte_carlo_var)
+# : confidences = array of tuples [(confidence, color)]
 def calculate_var(ticker, method, confidences=[(0.99, 'red')]):
     data = ticker.history(period='12mo')
     close_prices = data['Close']
     VaRs = []
     for confidence in confidences:
         value_at_risk = method(close_prices, confidence[0])
+        # The tuple is extended to (confidence, color, last_price + VaR)
+        # Value at Risk is subtracted from last price (VaR is negative number)
         VaRs.append(confidence + (close_prices.iloc[-1] + value_at_risk,))
     return generate_graph(ticker.info, close_prices, VaRs)
 
+# Calculate returns (in absolute values)
+# Take the next close price and subtract the previous
 def calculate_returns(close_prices):
     returns = []
     for i in range(len(close_prices) - 1):
         returns.append(close_prices.iloc[i + 1] - close_prices.iloc[i])
     return returns
 
+# Calculate VaR solely based on historical data
 def historic_var(close_prices, confidence):
     returns = calculate_returns(close_prices)
     return np.percentile(returns, 100 * (1 - confidence))
 
+# Monte Carlo VaR
 def monte_carlo_var(close_prices, confidence):
     TIME_SPAN = 22 # trading days
     NUM_SIMULATIONS = 10000
@@ -109,26 +135,38 @@ def monte_carlo_var(close_prices, confidence):
         return (average_daily_return * days) \
             + (standard_deviation * z_score * np.sqrt(days))
 
+    # Perform Monte-Carlo simulations
     scenario_returns = []
     for i in range(NUM_SIMULATIONS):
-        z_score = random_z_score()
+        z_score = random_z_score() # Include randomness in the calculation
         scenario_returns.append(scenario_gain_loss(standard_deviation, z_score, TIME_SPAN))
 
     return np.percentile(scenario_returns, 100 * (1 - confidence))
 
+# Variance-Covariance VaR
 def varcov_var(close_prices, confidence):
     # Source: https://github.com/MBKraus/Python_Portfolio__VaR_Tool/blob/master/Portfolio_VaR_Toolv5.py
     returns = calculate_returns(close_prices)
     average_daily_return = np.mean(returns) # mu
     standard_deviation = np.std(returns) # sigma
+    # This if-block was added to prevent an error being thrown
     if average_daily_return == 0 and standard_deviation == 0:
         return 0 # price is equal => no returns
     return scipy.stats.norm.ppf(1 - confidence, average_daily_return, standard_deviation)
 
+# Add plotly figure to Word document
+# : document = python-docx document
+# : graph = plotly Figure
 def add_graph(document, graph):
+    # Convert plotly figure to byte buffer
     image_buffer = BytesIO(to_image(graph, format='png'))
+    # Add picture to document from memory buffer
+    # The picture has fixed size of 16.5cm
     document.add_picture(image_buffer, width=Cm(16.5))
 
+# Insert simple dictionary as a table
+# : document = python-docx document
+# : info = dictionary of { 'Row name': value }
 def insert_info(document, info):
     i = 0
     table = document.add_table(rows=len(info.items()), cols=2)
@@ -138,53 +176,92 @@ def insert_info(document, info):
         row[1].text = str(value)
         i += 1
 
+# Insert pandas dataframe as a table (fetched from yfinance)
+# This function allows field filtering
+# : document = python-docx document
+# : balance_sheet = pandas dataframe (doesn't need to be Balance sheet)
+# : wanted_fields = array of strings ['Total Revenue', 'Cost of Revenue']
 def insert_table_filtered(document, balance_sheet, wanted_fields):
+    # We create a copy of the dataframe (because we will modify it inside the loop)
     for field in balance_sheet.copy().index:
         if not field in wanted_fields:
+            # Drop unwanted fields
             balance_sheet.drop(index = field, inplace=True)
+    # Create table and set its style
     table = document.add_table(rows=len(balance_sheet.index) + 1, cols=len(balance_sheet.columns) + 1)
     table.style = 'Light Grid'
+    # Add header row
     for i in range(len(balance_sheet.columns)):
+        # Format date and insert inside the first row of the table (the header row)
         table.cell(0, i + 1).text = datetime.strftime(balance_sheet.columns[i], '%m/%d/%Y')
+    # Add fields
     for i, field in enumerate(balance_sheet.index):
+        # Field name, e.g. Net Income Common Stockholders
         table.cell(i + 1, 0).text = field
+        # Fill values into the table as time series
         for j in range(len(balance_sheet.columns)):
             value = balance_sheet.loc[field].iloc[j]
-            value /= 1000
+            value /= 1000 # Convert to thousands
+            # Convert NaN values to N/A
             table.cell(i + 1, j + 1).text = "{:,}".format(int(value)) if not pd.isna(value) else "N/A"
+    # Add padding/space before and after the table so it looks good
     for row in table.rows:
         for cell in row.cells:
             cell.paragraphs[0].paragraph_format.space_after = Pt(2)
             cell.paragraphs[0].paragraph_format.space_before = Pt(2)
 
+# Insert pandas dataframe as a table (fetched from yfinance)
+# : document = python-docx document
+# : income_statement = pandas dataframe (doesn't need to be Income statement)
+# : to_thousands = boolean if True converts values to thousands using division
 def insert_table(document, income_statement, to_thousands = True):
+    # Create table and set its style
     table = document.add_table(rows=len(income_statement.index) + 1, cols=len(income_statement.columns) + 1)
     table.style = 'Light Grid'
+    # Add header row
     for i in range(len(income_statement.columns)):
+        # Format date and insert inside the first row of the table (the header row)
         table.cell(0, i + 1).text = datetime.strftime(income_statement.columns[i], '%m/%d/%Y')
+    # Add fields
     for i, field in enumerate(income_statement.index):
+        # Field name, e.g. Net Income Common Stockholders
         table.cell(i + 1, 0).text = field
+        # Fill values into the table as time series
         for j in range(len(income_statement.columns)):
             value = income_statement.loc[field].iloc[j]
+            # Convert to thousand if specified by a function parameter
             if to_thousands:
                 value /= 1000
+            # This value is the output field value (not necessarily a string yet)
             string_value = value
+            # To round we need a non NaN int
             if not pd.isna(value):
+                # To round we need an int
                 string_value = int(value)
                 if not to_thousands:
+                    # Round to 2 decimal places
                     string_value = round(value, 2)
+            # Convert NaN output values to N/A
             table.cell(i + 1, j + 1).text = "{:,}".format(string_value) if not pd.isna(value) else "N/A"
+    # Add padding/space before and after the table so it looks good
     for row in table.rows:
         for cell in row.cells:
             cell.paragraphs[0].paragraph_format.space_after = Pt(2)
             cell.paragraphs[0].paragraph_format.space_before = Pt(2)
 
-# https://stackoverflow.com/a/67388044
+# Fetch ESG chart using direct request to Yahoo Finance API,
+# as at the time of writing this script, yfinance library doesn't support it natively
+# : document = python-docx document
+# : symbol = Yahoo Finance ticker symbol (a string)
 def try_insert_sustainability(document, symbol):
     try:
+        # Source: https://stackoverflow.com/a/67388044
         url = f'https://query2.finance.yahoo.com/v1/finance/esgChart?symbol={symbol}'
         response = urllib.request.urlopen(url)
         data = json.loads(response.read())
+        # Convert the dataframe to the same format yfinance library uses,
+        # so we can use the same functions for inserting into the document,
+        # e.g. an insert_table() or insert_table_filtered()
         df = pd.DataFrame(data["esgChart"]["result"][0]["symbolSeries"])
         df.index = pd.to_datetime(df["timestamp"], unit="s")
         df = df.drop("timestamp", axis=1)
@@ -196,7 +273,7 @@ def try_insert_sustainability(document, symbol):
             'socialScore': 'Social Risk Score'
         }
         df = df.rename(index = row_names)
-        df = df.iloc[:, ::-1]
+        df = df.iloc[:, ::-1] # reverse dataframe
         heading_income = document.add_heading('Environment, Social and Governance (ESG)', 1)
         heading_income.paragraph_format.space_before = Pt(4)
         insert_table(document, df, False)
@@ -204,8 +281,14 @@ def try_insert_sustainability(document, symbol):
     except:
         pass
 
+# Generate backtest VaR lines (horizontal and vertical)
+# : fig = plotly figure
+# : dates = x axis (time)
+# : values = calculated VaRs (already subtracted from last price)
+# : color = line color, e.g. 'red'
 def make_line_for_backtest(fig, dates, values, color):
     for i in range(0, len(dates) - 1):
+        # Horizontal
         fig.add_shape(
             type='line',
             x0=dates[i],
@@ -214,6 +297,7 @@ def make_line_for_backtest(fig, dates, values, color):
             y1=values[i],
             line=dict(color=color, width=2)
         )
+        # Vertical
         fig.add_shape(
             type='line',
             x0=dates[i + 1],
@@ -223,16 +307,32 @@ def make_line_for_backtest(fig, dates, values, color):
             line=dict(color=color, width=1, dash='dash')
         )
 
+# Perform bakctesting
+# : ticker = yfinance ticker
+# : method = function, one of (historic_var, varcov_var, monte_carlo_var)
+# : confidences = array of tuples [(confidence, color)]
 def do_backtest(ticker, method, confidences):
+    # VaR is calculated every month, how many VaRs to calculate,
+    # default is 24
     MONTHS = 24
+
+    # How much historic data should be used for VaR calculation,
+    # default is 5 years
+    MAX_YEARS = 5
+    # The backtest needs at least 2 years worth of historic data
+    MIN_YEARS = 2
 
     fig = go.Figure()
 
+    # Retrieve historic data for close prices,
+    # we need only so much data equal to how many VaRs we want to show
     #end_date = datetime.now().replace(day=1)
     end_date = datetime.now()
     start_date = end_date - relativedelta(months=MONTHS)
     history = ticker.history(start=start_date, end=end_date)
 
+    # Since the VaR line needs to be added after the last price,
+    # we extend the x axis (time) by one month
     close_prices_price_line = history['Close']
     # Get the last date in the current data
     last_date = close_prices_price_line.index[-1]
@@ -248,13 +348,12 @@ def do_backtest(ticker, method, confidences):
     price_trace = go.Scatter(x=extended_close_prices.index, y=extended_close_prices, mode='lines', name='Price')
 
     fig.add_trace(price_trace)
+    # Add graph and axis titles
     fig.update_layout(title=f'{ticker.info.get("shortName")} ({ticker.info.get("symbol")})',
                     xaxis_title='Datum',
                     yaxis_title='Cena')
 
-    # jenom jedna hladina
-    #one_confidence = [confidences[0]]
-
+    # Perform backtesting for each confidence value
     for confidence in confidences:
         VaRs = []
         dates = []
@@ -263,15 +362,15 @@ def do_backtest(ticker, method, confidences):
         for i in range(0, MONTHS + 1):
             #end_date = datetime.now().replace(day=1) - relativedelta(months=i)
             end_date = datetime.now() - relativedelta(months=i)
-            start_date = end_date - timedelta(days=365 * 5)
+            start_date = end_date - timedelta(days=365 * MAX_YEARS)
 
             try:
                 data = ticker.history(start=start_date, end=end_date)
                 try:
                     difference = end_date.timestamp() - pd.to_datetime(data.index.min()).timestamp()
                     difference_years = int(round(difference / (60 * 60 * 24 * 365.25), 0))
-                    if not isFirstRun and difference_years < 2:
-                        print(f"Not enough data, (difference_years = {difference_years}) < 2")
+                    if not isFirstRun and difference_years < MIN_YEARS:
+                        print(f"Not enough data, (difference_years = {difference_years}) < {MIN_YEARS}")
                         print("The backtest won't go any further into the past.\n")
                         break
                 except:
