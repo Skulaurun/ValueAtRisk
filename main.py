@@ -1,7 +1,5 @@
 import os
-import math
 import json
-from time import sleep
 import urllib.request
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -11,11 +9,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objs as go
-import plotly.express as px
 from plotly.io import to_image
 from docx import Document
 from docx.shared import Cm, Pt
-from plotly.subplots import make_subplots
 from docx.enum.section import WD_SECTION
 
 # VÝSTUP V PODOBĚ (PRO KAŽDOU AKCII):
