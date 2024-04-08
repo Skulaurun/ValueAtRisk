@@ -14,15 +14,30 @@ from docx import Document
 from docx.shared import Cm, Pt
 from docx.enum.section import WD_SECTION
 
-# VÝSTUP V PODOBĚ (PRO KAŽDOU AKCII):
-    # Monte Carlo Method
-    # Graf pro 99%, 97%, 95%
+# <Configuration>
 
-    # Historical Method
-    # Graf pro 99%, 97%, 95%
+# VaR is calculated every month, how many VaRs to calculate,
+# default is 24
+BACKTEST_MONTHS = 24
 
-    # Variance-Covariance Method
-    # Graf pro 99%, 97%, 95%
+# How much historic data should be used for VaR calculation,
+# default is 5 years
+BACKTEST_MAX_YEARS = 5
+
+# The backtest needs at least 2 years worth of historic data
+BACKTEST_MIN_YEARS = 2
+
+# Monthly VaR
+MONTE_CARLO_TIME_SPAN = 22 # trading days
+
+# How many Monte Carlo simulations to run
+MONTE_CARLO_NUM_SIMULATIONS = 10000
+
+# Directory where to output reports,
+# created automatically if doesn't exist
+OUTPUT_DIRECTORY = './reports'
+
+# </Configuration>
 
 # Plotly doesn't add shapes added using `add_shape` to the legend,
 # so we create an invisible trace
@@ -46,7 +61,7 @@ def add_line_with_legend(fig, x0, x1, y0, y1, line, description):
 # Generate graph for three VaRs and price
 # : info = yfinance ticker.info
 # : close_prices = pandas dataframe of close prices acquired using yfinance
-# : VaRs = 
+# : VaRs = array of tuples [(confidence, color, value)]
 def generate_graph(info, close_prices, VaRs=[]):
     # Since the VaR line needs to be added after the last price,
     # we extend the x axis (time) by one month
@@ -119,8 +134,6 @@ def historic_var(close_prices, confidence):
 
 # Monte Carlo VaR
 def monte_carlo_var(close_prices, confidence):
-    TIME_SPAN = 22 # trading days
-    NUM_SIMULATIONS = 10000
     returns = calculate_returns(close_prices)
 
     average_daily_return = np.mean(returns) # mu
@@ -137,9 +150,9 @@ def monte_carlo_var(close_prices, confidence):
 
     # Perform Monte-Carlo simulations
     scenario_returns = []
-    for i in range(NUM_SIMULATIONS):
+    for i in range(MONTE_CARLO_NUM_SIMULATIONS):
         z_score = random_z_score() # Include randomness in the calculation
-        scenario_returns.append(scenario_gain_loss(standard_deviation, z_score, TIME_SPAN))
+        scenario_returns.append(scenario_gain_loss(standard_deviation, z_score, MONTE_CARLO_TIME_SPAN))
 
     return np.percentile(scenario_returns, 100 * (1 - confidence))
 
@@ -312,23 +325,13 @@ def make_line_for_backtest(fig, dates, values, color):
 # : method = function, one of (historic_var, varcov_var, monte_carlo_var)
 # : confidences = array of tuples [(confidence, color)]
 def do_backtest(ticker, method, confidences):
-    # VaR is calculated every month, how many VaRs to calculate,
-    # default is 24
-    MONTHS = 24
-
-    # How much historic data should be used for VaR calculation,
-    # default is 5 years
-    MAX_YEARS = 5
-    # The backtest needs at least 2 years worth of historic data
-    MIN_YEARS = 2
-
     fig = go.Figure()
 
     # Retrieve historic data for close prices,
     # we need only so much data equal to how many VaRs we want to show
     #end_date = datetime.now().replace(day=1)
     end_date = datetime.now()
-    start_date = end_date - relativedelta(months=MONTHS)
+    start_date = end_date - relativedelta(months=BACKTEST_MONTHS)
     history = ticker.history(start=start_date, end=end_date)
 
     # Since the VaR line needs to be added after the last price,
@@ -359,30 +362,37 @@ def do_backtest(ticker, method, confidences):
         dates = []
         prices = []
         isFirstRun = True
-        for i in range(0, MONTHS + 1):
+        for i in range(0, BACKTEST_MONTHS + 1):
             #end_date = datetime.now().replace(day=1) - relativedelta(months=i)
+            # Calculate fictional present date (end)
             end_date = datetime.now() - relativedelta(months=i)
-            start_date = end_date - timedelta(days=365 * MAX_YEARS)
+            # Calculate past date (start), how many years worth of data to use
+            start_date = end_date - timedelta(days=365 * BACKTEST_MAX_YEARS)
 
             try:
+                # Fetch data from yfinance for time frame
                 data = ticker.history(start=start_date, end=end_date)
                 try:
+                    # Calculate how much data we have in years (it is enough?)
                     difference = end_date.timestamp() - pd.to_datetime(data.index.min()).timestamp()
                     difference_years = int(round(difference / (60 * 60 * 24 * 365.25), 0))
-                    if not isFirstRun and difference_years < MIN_YEARS:
-                        print(f"Not enough data, (difference_years = {difference_years}) < {MIN_YEARS}")
+                    # If first run - calculate at least one VaR from the data we have
+                    if not isFirstRun and difference_years < BACKTEST_MIN_YEARS:
+                        print(f"Not enough data, (difference_years = {difference_years}) < {BACKTEST_MIN_YEARS}")
                         print("The backtest won't go any further into the past.\n")
                         break
                 except:
+                    # NaN error (not enough data in pandas dataframe to calculate difference)
                     print(f"Error during backtesting [ method = {method.__name__} ], historical data not available for given time period.")
                     print("The backtest won't go any further into the past.\n")
-                    break # NaN error, not enough data
+                    break
             except:
+                # Error from yfinance library (couldn't fetch the data for specific time period)
                 print(f"Error during backtesting [ method = {method.__name__} ], historical data not available for given time period.")
                 print("The backtest won't go any further into the past.\n")
                 break
-            close_prices = data['Close']
 
+            close_prices = data['Close']
             if close_prices.empty:
                 print(f"Error during backtesting [ method = {method.__name__} ], historical data not available for given time period.")
                 print("The backtest won't go any further into the past.\n")
@@ -393,20 +403,23 @@ def do_backtest(ticker, method, confidences):
             VaRs.append(close_prices.iloc[-1] + method(close_prices, confidence[0]))
             isFirstRun = False
 
+        # Reverse arrays (since items are added from present to past)
         dates = dates[::-1]
         VaRs = VaRs[::-1]
         prices = prices[::-1]
 
-        #duplicate
+        # Duplicate last (for final/future horizontal line)
         dates.append(datetime.now() + relativedelta(months=1))
         if len(VaRs) >= 1:
             VaRs.append(VaRs[-1])
 
+        # Display last VaR calculated in the graph legend (as a value)
         last_var_to_display = np.nan
         if len(VaRs) >= 1:
             last_var_to_display = round(VaRs[-1], 2)
 
-        make_line_for_backtest(fig, dates, VaRs, confidence[1])    
+        # Graph all VaRs
+        make_line_for_backtest(fig, dates, VaRs, confidence[1])
         fig.add_trace(go.Scatter(
             x=[None],
             y=[None],
@@ -418,6 +431,9 @@ def do_backtest(ticker, method, confidences):
     fig.update_layout(legend=dict(x=0.74, y=1.3, bgcolor='rgba(255, 255, 255, 0.5)'))
     return fig
 
+# Create report for ticker/stock
+# : ticker = yfinance ticker
+# : output_path = file path where to save word document
 def create_report(ticker, output_path):
     CONFIDENCES = [
         (0.99, 'red'),
@@ -563,12 +579,12 @@ def create_report(ticker, output_path):
 
     document.save(output_path)
 
-OUTPUT_DIRECTORY = './reports'
+# Create output directory
 if not os.path.exists(OUTPUT_DIRECTORY):
     os.makedirs(OUTPUT_DIRECTORY)
 
-# Očekává textový soubor 'TICKERS.txt',
-# kde na každém řádku je 1 yfinance ticker.
+# Expects a text file 'TICKERS.txt',
+# where each line represents one yfinance ticker.
 
 i = 0
 with open('TICKERS.txt', 'r') as f:
